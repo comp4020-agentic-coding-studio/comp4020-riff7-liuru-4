@@ -1,6 +1,8 @@
 ---
-import { findClash } from "../lib/clashes";
+import { describeClash, effectiveSlot, findClashes } from "../lib/clashes";
 import { GROUPS_LAST_CHECKED, listExceptions, listGroups } from "../lib/db";
+import { buildTimetable, minutesLabel, shortRoom } from "../lib/timetable";
+import { DAYS, FIRST_WEEK, LAST_WEEK, currentWeek, dateLabel, weekRangeLabel } from "../lib/weeks";
 import "../styles.css";
 
 const groups = listGroups();
@@ -15,6 +17,46 @@ const filterSlug = Astro.url.searchParams.get("group") ?? "";
 const visibleExceptions = filterSlug
   ? exceptionRows.filter((exception) => exception.groupSlug === filterSlug)
   : exceptionRows;
+
+// The week the grid shows: ?week= if it names a teaching week, otherwise
+// whichever week it is in Canberra right now.
+const thisWeek = currentWeek();
+const requestedWeek = Number(Astro.url.searchParams.get("week"));
+const week =
+  Number.isInteger(requestedWeek) && requestedWeek >= FIRST_WEEK && requestedWeek <= LAST_WEEK
+    ? requestedWeek
+    : thisWeek;
+const weekNumbers = Array.from({ length: LAST_WEEK - FIRST_WEEK + 1 }, (_, i) => FIRST_WEEK + i);
+const weekHref = (n: number) =>
+  `/?week=${n}${filterSlug ? `&group=${encodeURIComponent(filterSlug)}` : ""}#week-view`;
+
+const timetable = buildTimetable(week, groups, exceptionRows);
+const rowOf = (minutes: number) => (minutes - timetable.axisStart) / timetable.slotMinutes + 1;
+const rows = rowOf(timetable.axisEnd) - 1;
+const hours: number[] = [];
+for (let m = timetable.axisStart; m < timetable.axisEnd; m += 60) hours.push(m);
+// A day with two sessions side by side gets twice the width, so neither
+// block is squeezed to an unreadable sliver.
+const columns = [
+  "3rem",
+  ...timetable.days.map((day) => `minmax(${6.5 * day.lanes}rem, ${day.lanes}fr)`),
+].join(" ");
+const HUES = [215, 145, 30, 280, 340, 185];
+const hueOf = new Map(groups.map((group, i) => [group.slug, HUES[i % HUES.length]]));
+
+// With a group picked, say plainly where that group is this week — the one
+// line most people open this page for.
+const focusGroup = groupBySlug.get(filterSlug);
+const focusSlot = focusGroup ? effectiveSlot(focusGroup, week, exceptionRows) : undefined;
+const focusPending = exceptionRows.filter(
+  (exception) => exception.groupSlug === filterSlug && exception.week === week && exception.status === "proposed",
+);
+
+// Rooms the course has actually published, offered as suggestions so a
+// proposal names a room the clash check can match.
+const knownRooms = [
+  ...new Set([...groups.map((group) => group.room), ...exceptionRows.flatMap((e) => (e.room ? [e.room] : []))]),
+];
 ---
 
 <!doctype html>
@@ -41,13 +83,264 @@ const visibleExceptions = filterSlug
         all of it live across open tabs, and still there on reload.
       </p>
 
+      <section id="week-view" aria-labelledby="week-heading">
+        <h2 id="week-heading">
+          Week {week} <span class="week-dates">{weekRangeLabel(week)}</span>
+          {week === thisWeek ? <span class="this-week">this week</span> : null}
+        </h2>
+        <nav aria-label="Teaching weeks" class="week-picker">
+          {
+            weekNumbers.map((n) => (
+              <a href={weekHref(n)} aria-current={n === week ? "page" : undefined} class={n === thisWeek ? "now" : undefined}>
+                <span class="visually-hidden">Week </span>
+                {n}
+                {n === thisWeek ? <span class="visually-hidden"> (this week)</span> : null}
+              </a>
+            ))
+          }
+        </nav>
+        <form method="get" action="/" class="group-filter">
+          <input type="hidden" name="week" value={week} />
+          <label for="group-filter">Highlight a group</label>
+          <select id="group-filter" name="group">
+            <option value="">All groups</option>
+            {
+              groups.map((group) => (
+                <option value={group.slug} selected={group.slug === filterSlug}>
+                  {group.name}
+                </option>
+              ))
+            }
+          </select>
+          <button>Show</button>
+        </form>
+
+        <div id="week-live">
+          {
+            focusGroup && focusSlot ? (
+              <p class="your-slot">
+                <strong>{focusGroup.name}</strong>, week {week}:{" "}
+                <strong>
+                  {focusSlot.day} {dateLabel(week, focusSlot.day)}, {focusSlot.start}–{focusSlot.end}
+                </strong>{" "}
+                in {focusSlot.room}.{" "}
+                {focusSlot.exception
+                  ? `Moved from their usual ${focusGroup.day} slot — ${focusSlot.exception.reason}.`
+                  : "Their standing slot."}{" "}
+                {focusPending.length > 0
+                  ? `${focusPending.length} proposal${focusPending.length === 1 ? "" : "s"} to move it still pending.`
+                  : null}
+              </p>
+            ) : null
+          }
+          <p class="tt-legend">
+            <span class="key standing">standing slot</span>
+            <span class="key moved">confirmed move</span>
+            <span class="key proposed">proposed</span>
+            <span class="key vacated">vacated by a move</span>
+            <span class="key clash">clash</span>
+          </p>
+          <div
+            class="timetable"
+            role="region"
+            aria-label={`Week ${week} timetable`}
+            tabindex="0"
+            style={`--rows: ${rows}; grid-template-columns: ${columns}`}
+          >
+            <div class="tt-axis" aria-hidden="true">
+              {hours.map((m) => <span style={`grid-row: ${rowOf(m)}`}>{minutesLabel(m)}</span>)}
+            </div>
+            {
+              timetable.days.map((day) => (
+                <section class="tt-day" aria-labelledby={`tt-day-${day.index}`}>
+                  <h3 id={`tt-day-${day.index}`}>
+                    {day.label} <span class="tt-date">{day.date}</span>
+                  </h3>
+                  <ul class="tt-lanes" style={`--lanes: ${day.lanes}`}>
+                    {day.blocks.map((block) => (
+                      <li
+                        class:list={[
+                          "tt-block",
+                          block.kind,
+                          {
+                            clash: block.clashes.length > 0,
+                            dim: filterSlug !== "" && block.groupSlug !== filterSlug,
+                            focus: block.groupSlug === filterSlug,
+                          },
+                        ]}
+                        style={`grid-row: ${rowOf(block.start)} / ${rowOf(block.end)}; grid-column: ${block.lane + 1}; --hue: ${hueOf.get(block.groupSlug) ?? 0}`}
+                        title={block.clashes
+                          .map((c) => `${c.kind} clash with ${c.with}${c.pending ? "'s proposal" : ""}`)
+                          .join("; ") || undefined}
+                      >
+                        {block.exceptionId !== undefined ? (
+                          <a href={`#exception-${block.exceptionId}`}>
+                            <strong>{block.name}</strong>
+                          </a>
+                        ) : (
+                          <strong>{block.name}</strong>
+                        )}
+                        <span class="tt-time">
+                          {block.startLabel}–{block.endLabel}
+                        </span>
+                        <span>{shortRoom(block.room)}</span>
+                        {block.note ? (
+                          <span class="tt-note">
+                            {block.noteLead ? <span class="visually-hidden">{block.noteLead}</span> : null}
+                            {block.note}
+                          </span>
+                        ) : null}
+                        {block.clashes.map((clash) => (
+                          <span class="tt-clash">
+                            ⚠ <span class="visually-hidden">{clash.kind} clash with </span>
+                            <span aria-hidden="true">{clash.kind}: </span>
+                            {clash.with}
+                            {clash.pending ? <span class="visually-hidden">'s proposal</span> : null}
+                          </span>
+                        ))}
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              ))
+            }
+          </div>
+        </div>
+      </section>
+
+      <section aria-labelledby="exceptions-heading">
+        <h2 id="exceptions-heading">Exceptions</h2>
+        {
+          filterSlug ? (
+            <p>
+              Showing only <strong>{groupBySlug.get(filterSlug)?.name ?? filterSlug}</strong>'s
+              proposals — <a href={`/?week=${week}`}>show all groups</a>.
+            </p>
+          ) : null
+        }
+        <ul id="exceptions" aria-live="polite">
+          {
+            filterSlug && visibleExceptions.length === 0 ? (
+              <li class="empty-state">
+                {groupBySlug.get(filterSlug)?.name ?? filterSlug} has no exceptions yet.
+              </li>
+            ) : null
+          }
+          {
+            visibleExceptions.map((exception) => {
+              const group = groupBySlug.get(exception.groupSlug);
+              const date = dateLabel(exception.week, exception.day);
+              // Checked for "proposed" and "confirmed" alike, not just
+              // "proposed": two proposals can each get confirmed
+              // independently (the whole point of a live, multi-tab board)
+              // without either confirmer ever seeing the other's clash
+              // warning at the moment they act. Keeping the check alive
+              // after confirmation is what makes a real double-booking stay
+              // visible instead of disappearing the instant both sides
+              // settle.
+              const clashes =
+                exception.status !== "declined" ? findClashes(exception, exceptionRows, groups) : [];
+              return (
+                <li id={`exception-${exception.id}`} data-status={exception.status}>
+                  <strong>{group?.name ?? exception.groupSlug}</strong>,{" "}
+                  <a href={`/?week=${exception.week}#week-view`}>week {exception.week}</a>: moves to{" "}
+                  {exception.day}
+                  {date ? ` ${date}` : null} {exception.start}–{exception.end}
+                  {exception.room ? <> in {exception.room}</> : null} — {exception.reason}
+                  {" "}
+                  <span class="status">{exception.status}</span>
+                  {clashes.map((clash) => (
+                    <p class="clash-warning">{describeClash(clash, groups)}</p>
+                  ))}
+                  {exception.status === "proposed" ? (
+                    <>
+                      <form method="post" action={`/api/exceptions/${exception.id}/confirm`}>
+                        <button>Confirm</button>
+                      </form>
+                      <form method="post" action={`/api/exceptions/${exception.id}/decline`}>
+                        <button>Decline</button>
+                      </form>
+                    </>
+                  ) : null}
+                </li>
+              );
+            })
+          }
+        </ul>
+      </section>
+
+      <section aria-labelledby="propose-heading">
+        <h2 id="propose-heading">Propose an exception</h2>
+        <form
+          id="propose"
+          class="propose"
+          method="post"
+          action="/api/exceptions"
+          data-groups={JSON.stringify(groups)}
+          data-exceptions={JSON.stringify(exceptionRows)}
+        >
+          <p>
+            <label for="groupSlug">Group</label>
+            <select id="groupSlug" name="groupSlug" required>
+              {
+                groups.map((group) => (
+                  <option value={group.slug} selected={group.slug === filterSlug}>
+                    {group.name}
+                  </option>
+                ))
+              }
+            </select>
+          </p>
+          <p>
+            <label for="week">Week</label>
+            <select id="week" name="week" required>
+              {
+                weekNumbers.map((n) => (
+                  <option value={n} selected={n === week}>
+                    Week {n} ({weekRangeLabel(n)})
+                  </option>
+                ))
+              }
+            </select>
+          </p>
+          <p>
+            <label for="day">New day</label>
+            <select id="day" name="day" required>
+              <option value="">Choose a day</option>
+              {DAYS.slice(0, 5).map((day) => <option value={day}>{day}</option>)}
+            </select>
+          </p>
+          <p>
+            <label for="start">New start</label>
+            <input id="start" name="start" type="time" step="900" required />
+          </p>
+          <p>
+            <label for="end">New end</label>
+            <input id="end" name="end" type="time" step="900" required />
+          </p>
+          <p>
+            <label for="room">New room (only if different)</label>
+            <input id="room" name="room" maxlength="200" list="known-rooms" />
+            <datalist id="known-rooms">
+              {knownRooms.map((room) => <option value={room} />)}
+            </datalist>
+          </p>
+          <p class="wide">
+            <label for="reason">Reason</label>
+            <input id="reason" name="reason" required maxlength="500" />
+          </p>
+          <p id="propose-check" class="propose-check" aria-live="polite"></p>
+          <button>Propose</button>
+        </form>
+      </section>
+
       <section aria-labelledby="groups-heading">
         <h2 id="groups-heading">Standing slots</h2>
         <p class="cache-note">
           Cached from the course website's published API, last checked{" "}
           {GROUPS_LAST_CHECKED}. It doesn't refresh itself — if the website
           changes a slot mid-week, this table won't notice until the app is
-          redeployed with a fresh seed. The exceptions below are this app's
+          redeployed with a fresh seed. The exceptions above are this app's
           own live state, not a cache.
         </p>
         <table>
@@ -75,204 +368,90 @@ const visibleExceptions = filterSlug
           </tbody>
         </table>
       </section>
-
-      <section aria-labelledby="exceptions-heading">
-        <h2 id="exceptions-heading">Exceptions</h2>
-        <form method="get" action="/">
-          <label for="group-filter">Filter by group</label>
-          <select id="group-filter" name="group">
-            <option value="">All groups</option>
-            {
-              groups.map((group) => (
-                <option value={group.slug} selected={group.slug === filterSlug}>
-                  {group.name}
-                </option>
-              ))
-            }
-          </select>
-          <button>Filter</button>
-        </form>
-        {
-          filterSlug ? (
-            <p>
-              Showing only <strong>{groupBySlug.get(filterSlug)?.name ?? filterSlug}</strong>'s
-              proposals — <a href="/">show all groups</a>.
-            </p>
-          ) : null
-        }
-        <ul id="exceptions" data-groups={JSON.stringify(groups)} aria-live="polite">
-          {
-            filterSlug && visibleExceptions.length === 0 ? (
-              <li class="empty-state">
-                {groupBySlug.get(filterSlug)?.name ?? filterSlug} has no exceptions yet.
-              </li>
-            ) : null
-          }
-          {
-            visibleExceptions.map((exception) => {
-              const group = groupBySlug.get(exception.groupSlug);
-              // Checked for "proposed" and "confirmed" alike, not just
-              // "proposed": two proposals can each get confirmed
-              // independently (the whole point of a live, multi-tab board)
-              // without either confirmer ever seeing the other's clash
-              // warning at the moment they act. Keeping the check alive
-              // after confirmation is what makes a real double-booking stay
-              // visible instead of disappearing the instant both sides
-              // settle.
-              const clash =
-                exception.status !== "declined"
-                  ? findClash(exception, exceptionRows, groupBySlug)
-                  : undefined;
-              const clashGroup = clash ? groupBySlug.get(clash.groupSlug) : undefined;
-              return (
-                <li id={`exception-${exception.id}`} data-status={exception.status}>
-                  <strong>{group?.name ?? exception.groupSlug}</strong>, week{" "}
-                  {exception.week}: moves to {exception.day} {exception.start}–
-                  {exception.end}
-                  {exception.room ? <> in {exception.room}</> : null} — {exception.reason}
-                  {" "}
-                  <span class="status">{exception.status}</span>
-                  {clash ? (
-                    <p class="clash-warning">
-                      ⚠ clashes with {clashGroup?.name ?? clash.groupSlug}'s confirmed
-                      exception for the same week, day, time and room
-                    </p>
-                  ) : null}
-                  {exception.status === "proposed" ? (
-                    <>
-                      <form method="post" action={`/api/exceptions/${exception.id}/confirm`}>
-                        <button>Confirm</button>
-                      </form>
-                      <form method="post" action={`/api/exceptions/${exception.id}/decline`}>
-                        <button>Decline</button>
-                      </form>
-                    </>
-                  ) : null}
-                </li>
-              );
-            })
-          }
-        </ul>
-      </section>
-
-      <section aria-labelledby="propose-heading">
-        <h2 id="propose-heading">Propose an exception</h2>
-        <form method="post" action="/api/exceptions">
-          <p>
-            <label for="groupSlug">Group</label>
-            <select id="groupSlug" name="groupSlug" required>
-              {groups.map((group) => <option value={group.slug}>{group.name}</option>)}
-            </select>
-          </p>
-          <p>
-            <label for="week">Week</label>
-            <input id="week" name="week" type="number" min="1" max="12" required />
-          </p>
-          <p>
-            <label for="day">New day</label>
-            <input id="day" name="day" required maxlength="10" placeholder="Wed" />
-          </p>
-          <p>
-            <label for="start">New start</label>
-            <input id="start" name="start" required maxlength="5" placeholder="14:00" />
-          </p>
-          <p>
-            <label for="end">New end</label>
-            <input id="end" name="end" required maxlength="5" placeholder="15:30" />
-          </p>
-          <p>
-            <label for="room">New room (only if different)</label>
-            <input id="room" name="room" maxlength="200" />
-          </p>
-          <p>
-            <label for="reason">Reason</label>
-            <input id="reason" name="reason" required maxlength="500" />
-          </p>
-          <button>Propose</button>
-        </form>
-      </section>
     </main>
     <script>
-      // The live half of the board: subscribe to the SSE stream and rebuild
-      // the whole list from the whole-list payload it carries (see
-      // src/pages/api/events.ts for why one row isn't enough) — reusing the
-      // exact same findClash the server rendered with, so a clash warning
-      // appears or clears the instant another tab's proposal/confirm/decline
-      // changes it, not just on the next reload.
-      import { findClash } from "../lib/clashes";
+      // The live half of the board. The server renders the grid and the
+      // list; when the SSE stream says anything changed, this tab re-fetches
+      // its own URL and swaps those two regions in, so there's one renderer
+      // for both instead of a second DOM-building copy that could drift from
+      // it. The stream's whole-list payload (see src/pages/api/events.ts)
+      // still feeds the propose form's clash check below.
+      import { describeClash, findClashes } from "../lib/clashes";
       import type { Exception, Group } from "../lib/schema";
+      import { dateLabel } from "../lib/weeks";
 
-      const list = document.querySelector<HTMLElement>("#exceptions");
-      const groups: Group[] = JSON.parse(list?.dataset.groups ?? "[]");
-      const groupBySlug = new Map(groups.map((group) => [group.slug, group]));
-      // The filter is a plain GET query param — a full navigation applies a
-      // new one, so this only has to hold the value steady across live SSE
-      // updates on the page already loaded.
-      const filterSlug = new URLSearchParams(location.search).get("group") ?? "";
+      const form = document.querySelector<HTMLFormElement>("#propose");
+      const check = document.querySelector<HTMLElement>("#propose-check");
+      const groups: Group[] = JSON.parse(form?.dataset.groups ?? "[]");
+      let all: Exception[] = JSON.parse(form?.dataset.exceptions ?? "[]");
 
-      function renderRow(exception: Exception, all: Exception[]): HTMLLIElement {
-        const li = document.createElement("li");
-        li.id = `exception-${exception.id}`;
-        li.dataset.status = exception.status;
-
-        const strong = document.createElement("strong");
-        strong.textContent = groupBySlug.get(exception.groupSlug)?.name ?? exception.groupSlug;
-        li.append(strong);
-
-        const roomText = exception.room ? ` in ${exception.room}` : "";
-        li.append(
-          `, week ${exception.week}: moves to ${exception.day} ${exception.start}–${exception.end}${roomText} — ${exception.reason} `,
+      // Tells the proposer about a clash *before* they submit, with the
+      // same findClashes the list and grid render with.
+      function checkProposal() {
+        if (!form || !check) return;
+        const data = new FormData(form);
+        const field = (name: string) => String(data.get(name) ?? "").trim();
+        const draft: Exception = {
+          id: -1,
+          groupSlug: field("groupSlug"),
+          week: Number(field("week")),
+          reason: "",
+          day: field("day"),
+          start: field("start"),
+          end: field("end"),
+          room: field("room") || null,
+          status: "proposed",
+          createdAt: "",
+        };
+        const lines: string[] = [];
+        let state = "";
+        if (draft.groupSlug && draft.week && draft.day) {
+          const date = dateLabel(draft.week, draft.day);
+          if (date) lines.push(`That's ${draft.day} ${date}.`);
+        }
+        if (draft.groupSlug && draft.week && draft.day && draft.start && draft.end) {
+          if (draft.end <= draft.start) {
+            lines.push("⚠ The new end is before the new start.");
+            state = "clash";
+          } else {
+            const clashes = findClashes(draft, all, groups);
+            lines.push(
+              ...(clashes.length > 0
+                ? clashes.map((clash) => describeClash(clash, groups))
+                : [`✓ No room or tutor clash with any other group in week ${draft.week}.`]),
+            );
+            state = clashes.length > 0 ? "clash" : "clear";
+          }
+        }
+        check.dataset.state = state;
+        check.replaceChildren(
+          ...lines.map((text) => {
+            const span = document.createElement("span");
+            span.textContent = text;
+            return span;
+          }),
         );
+      }
+      form?.addEventListener("input", checkProposal);
+      form?.addEventListener("change", checkProposal);
+      checkProposal();
 
-        const status = document.createElement("span");
-        status.className = "status";
-        status.textContent = exception.status;
-        li.append(status);
-
-        // Same rule as the server render: check proposed and confirmed rows
-        // alike, so a clash between two independently-confirmed exceptions
-        // stays visible instead of vanishing once both sides settle.
-        if (exception.status !== "declined") {
-          const clash = findClash(exception, all, groupBySlug);
-          if (clash) {
-            const p = document.createElement("p");
-            p.className = "clash-warning";
-            const clashGroupName = groupBySlug.get(clash.groupSlug)?.name ?? clash.groupSlug;
-            p.textContent = `⚠ clashes with ${clashGroupName}'s confirmed exception for the same week, day, time and room`;
-            li.append(p);
-          }
+      async function refresh() {
+        const res = await fetch(location.href);
+        if (!res.ok) return;
+        const fresh = new DOMParser().parseFromString(await res.text(), "text/html");
+        for (const id of ["week-live", "exceptions"]) {
+          const next = fresh.getElementById(id);
+          const current = document.getElementById(id);
+          if (next && current) current.replaceChildren(...next.childNodes);
         }
-
-        if (exception.status === "proposed") {
-          for (const [label, action] of [
-            ["Confirm", `/api/exceptions/${exception.id}/confirm`],
-            ["Decline", `/api/exceptions/${exception.id}/decline`],
-          ] as const) {
-            const form = document.createElement("form");
-            form.method = "post";
-            form.action = action;
-            const button = document.createElement("button");
-            button.textContent = label;
-            form.append(button);
-            li.append(form);
-          }
-        }
-
-        return li;
       }
 
       const source = new EventSource("/api/events");
       source.addEventListener("message", (event) => {
-        const all: Exception[] = JSON.parse(event.data);
-        const visible = filterSlug ? all.filter((exception) => exception.groupSlug === filterSlug) : all;
-        if (filterSlug && visible.length === 0) {
-          const li = document.createElement("li");
-          li.className = "empty-state";
-          li.textContent = `${groupBySlug.get(filterSlug)?.name ?? filterSlug} has no exceptions yet.`;
-          list?.replaceChildren(li);
-        } else {
-          list?.replaceChildren(...visible.map((exception) => renderRow(exception, all)));
-        }
+        all = JSON.parse(event.data);
+        checkProposal();
+        void refresh();
       });
     </script>
   </body>

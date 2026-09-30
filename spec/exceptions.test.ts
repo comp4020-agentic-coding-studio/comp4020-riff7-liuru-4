@@ -56,7 +56,8 @@ describe("crit slot exceptions", () => {
       }),
     );
     expect(res.status).toBe(303);
-    expect(res.headers.get("location")).toBe("/");
+    // back to the board, opened on the week just proposed for
+    expect(res.headers.get("location")).toBe("/?week=10#week-view");
   });
 
   it("persists the proposal: a fresh page load includes it, marked proposed", async () => {
@@ -312,6 +313,56 @@ describe("crit slot exceptions", () => {
     const after = await fetch(baseUrl);
     const afterHtml = await after.text();
     expect(afterHtml).toMatch(new RegExp(`id="exception-${id}"[^>]*data-status="confirmed"`));
+  });
+
+  it("flags a proposal that moves into another group's standing slot and room", async () => {
+    // Yunlin holds Wed 14:00–15:30 in the shared room every week; Dachi
+    // moving to Wed 14:30 with no room override lands in the same room,
+    // overlapping — a clash with no confirmed exception involved at all.
+    const reason = `standing clash probe ${process.hrtime.bigint()}`;
+    await post(
+      "/api/exceptions",
+      new URLSearchParams({ groupSlug: "dachi", week: "11", reason, day: "Wed", start: "14:30", end: "16:00", room: "" }),
+    );
+    const html = await (await fetch(baseUrl)).text();
+    expect(html).toMatch(new RegExp(`${reason}[\\s\\S]{0,400}?clash-warning[^<]*Room clash with Yunlin\\S* standing slot`));
+  });
+
+  it("flags a tutor clash when a group moves into its tutor's other session, in a different room", async () => {
+    // Bill McAlister runs both Yunlin (Wed 14:00) and Liuru (Wed 15:30).
+    const reason = `tutor clash probe ${process.hrtime.bigint()}`;
+    await post(
+      "/api/exceptions",
+      new URLSearchParams({
+        groupSlug: "yunlin",
+        week: "12",
+        reason,
+        day: "Wed",
+        start: "15:00",
+        end: "16:30",
+        room: "Marie Reay Building (155), Room 3.05",
+      }),
+    );
+    const html = await (await fetch(baseUrl)).text();
+    expect(html).toMatch(new RegExp(`${reason}[\\s\\S]{0,400}?clash-warning[^<]*Tutor clash: Bill McAlister also runs Liuru`));
+  });
+
+  it("draws the week as a timetable: real week-9 moves in their new place, the slot they vacated marked", async () => {
+    const html = await (await fetch(new URL("/?week=9", baseUrl))).text();
+    const grid = html.match(/<div class="timetable"[\s\S]*?<\/section>\s*<\/div>/)?.[0] ?? "";
+    expect(html).toContain("5 Oct – 9 Oct");
+    // Shitao's seeded move: off Monday, onto Tuesday 6 October.
+    const tuesday = grid.match(/<h3[^>]*>\s*Tue[\s\S]*?<\/ul>/)?.[0] ?? "";
+    expect(tuesday).toContain("6 Oct");
+    expect(tuesday).toMatch(/tt-block moved[\s\S]*?Shitao/);
+    const monday = grid.match(/<h3[^>]*>\s*Mon[\s\S]*?<\/ul>/)?.[0] ?? "";
+    expect(monday).toMatch(/tt-block vacated[\s\S]*?Shitao[\s\S]*?→ Tue 6 Oct/);
+  });
+
+  it("falls back to a real teaching week when ?week= isn't one", async () => {
+    const res = await fetch(new URL("/?week=99", baseUrl));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toMatch(/<h2 id="week-heading">\s*Week ([1-9]|1[0-2]) /);
   });
 
   it("filters the exceptions list to one group via ?group=", async () => {

@@ -4,8 +4,9 @@ import { bus } from "../../lib/events";
 
 // The write half of the board: a group (or their tutor) proposes a one-off
 // replacement for a standing slot. The 303 redirect makes the form work with
-// no client-side JavaScript — the submitting tab re-renders from SQLite;
-// every other open tab hears about it over the SSE stream.
+// no client-side JavaScript — the submitting tab re-renders from SQLite, on
+// the week it just proposed for, so the new block is on the grid in front of
+// them; every other open tab hears about it over the SSE stream.
 export const POST: APIRoute = async ({ request, redirect }) => {
   const form = await request.formData();
   const groupSlug = String(form.get("groupSlug") ?? "").trim();
@@ -30,7 +31,10 @@ export const POST: APIRoute = async ({ request, redirect }) => {
       end: end.slice(0, 5),
       room: room ? room.slice(0, 200) : null,
     });
-    if (exception) bus.emit("exceptions", listExceptions());
+    if (exception) {
+      bus.emit("exceptions", listExceptions());
+      return redirect(`/?week=${exception.week}#week-view`, 303);
+    }
   }
   return redirect("/", 303);
 };

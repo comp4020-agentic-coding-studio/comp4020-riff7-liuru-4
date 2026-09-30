@@ -10,7 +10,11 @@ export const POST: APIRoute = async ({ params, redirect }) => {
   const id = Number(params.id);
   if (Number.isInteger(id)) {
     const exception = declineException(id);
-    if (exception) bus.emit("exceptions", listExceptions());
+    // back to the row that was just decided, on its own week's grid
+    if (exception) {
+      bus.emit("exceptions", listExceptions());
+      return redirect(`/?week=${exception.week}#exception-${exception.id}`, 303);
+    }
   }
   return redirect("/", 303);
 };

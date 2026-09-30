@@ -23,13 +23,25 @@ not a public audience that needs authentication.
 - The core promise is persistence: propose an exception, reload, it's still
   there — `spec/exceptions.test.ts` asserts this against the running app, the
   same way the starter's own `guestbook.test.ts` did before this replaced it.
-- A proposal that would double-book a room already held by another group's
-  confirmed exception (same week, day, time, room) gets a visible warning,
-  live across tabs and surviving either or both sides later getting confirmed
-  — `src/lib/clashes.ts`, exercised by the clash tests in
-  `spec/exceptions.test.ts`.
+- A proposal that overlaps another group's slot that week — their standing
+  slot, or the confirmed move replacing it — gets a visible warning when
+  they'd share a room, or share a tutor who can't be in two places. It's
+  live across tabs, shown in the propose form before you submit, and survives
+  either or both sides later getting confirmed — `src/lib/clashes.ts`,
+  exercised by the clash tests in `spec/exceptions.test.ts`.
 - The accessibility floor (`spec/invariants.test.ts`) and the read-only
   `/readme/` promise (`spec/readme.test.ts`) are enforced checks, not
   judgement calls; which system to model, and how thin a slice counts as
   "wired end to end," were mine to decide, and `CLAUDE.md` records the rules
   that decision produced.
+
+## Riff: the week, drawn
+
+The board above answers "what's been asked for"; it never answered the
+question people actually open it with — where is everyone in week 9? The
+riff resolves each teaching week (dates from the same course API's `weeks`
+map, `src/lib/weeks.ts`) into a timetable at the top of the page: every
+group's effective slot, the slot a confirmed move vacated, pending proposals
+drawn where they'd land, and clashes outlined on both sides. Pick a group to
+get a one-line "you're here this week" answer. The grid re-renders live when
+any tab proposes, confirms or declines.
